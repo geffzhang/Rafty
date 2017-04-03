@@ -22,7 +22,10 @@ namespace Rafty.Raft
         private readonly object _lock = new object();
         private Guid _lastAppendEntriesMessageId;
 
-        public Server(IMessageBus messageBus, IServersInCluster serversInCluster, IStateMachine stateMachine, ILogger logger)
+        public Server(IMessageBus messageBus, 
+            IServersInCluster serversInCluster, 
+            IStateMachine stateMachine, 
+            ILogger logger)
         {
             _stateMachine = stateMachine;
             _logger = logger;
@@ -262,7 +265,7 @@ namespace Rafty.Raft
             {
                 _logger.LogDebug("Server Received Command");
                 _appendingEntries = true;
-                Log.Add(new Log(CurrentTerm, (FakeCommand)command));
+                Log.Add(new Log(CurrentTerm, command));
                 CommitIndex = Log.Count - 1;
 
                 var remoteServers = GetRemoteServers();

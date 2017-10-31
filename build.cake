@@ -1,6 +1,7 @@
 ﻿#tool "nuget:?package=GitVersion.CommandLine"
 #tool "nuget:?package=GitReleaseNotes"
 #addin "nuget:?package=Cake.Json"
+#addin nuget:?package=Newtonsoft.Json&version=9.0.1
 
 // compile
 var compileConfig = Argument("configuration", "Release");
@@ -16,6 +17,10 @@ var unitTestAssemblies = @"./test/Rafty.UnitTests/Rafty.UnitTests.csproj";
 // acceptance testing
 var artifactsForAcceptanceTestsDir = artifactsDir + Directory("AcceptanceTests");
 var acceptanceTestAssemblies = @"./test/Rafty.AcceptanceTests/Rafty.AcceptanceTests.csproj";
+
+// integration testing
+var artifactsForIntegrationTestsDir = artifactsDir + Directory("IntegrationTests");
+var integrationTestAssemblies = @"./test/Rafty.IntegrationTests/Rafty.IntegrationTests.csproj";
 
 // benchmark testing
 var artifactsForBenchmarkTestsDir = artifactsDir + Directory("BenchmarkTests");
@@ -136,9 +141,23 @@ Task("RunAcceptanceTests")
 		DotNetCoreTest(acceptanceTestAssemblies, settings);
 	});
 
+Task("RunIntegrationTests")
+	.IsDependentOn("Compile")
+	.Does(() =>
+	{
+		var settings = new DotNetCoreTestSettings
+		{
+			Configuration = compileConfig,
+		};
+
+		EnsureDirectoryExists(artifactsForIntegrationTestsDir);
+		DotNetCoreTest(integrationTestAssemblies, settings);
+	});
+
 Task("RunTests")
-	.IsDependentOn("RunUnitTests");
-	//.IsDependentOn("RunAcceptanceTests");
+	.IsDependentOn("RunUnitTests")
+	.IsDependentOn("RunAcceptanceTests")
+	.IsDependentOn("RunIntegrationTests");
 
 Task("CreatePackages")
 	.IsDependentOn("Compile")
@@ -147,11 +166,11 @@ Task("CreatePackages")
 		EnsureDirectoryExists(packagesDir);
 		CopyFiles("./src/**/Rafty.*.nupkg", packagesDir);
 
-		GenerateReleaseNotes();
+		//GenerateReleaseNotes();
 
         System.IO.File.WriteAllLines(artifactsFile, new[]{
             "nuget:Rafty." + buildVersion + ".nupkg",
-            "releaseNotes:releasenotes.md"
+            //"releaseNotes:releasenotes.md"
         });
 
 		if (AppVeyor.IsRunningOnAppVeyor)
@@ -205,19 +224,48 @@ Task("DownloadGitHubReleaseArtifacts")
     .IsDependentOn("UpdateVersionInfo")
     .Does(() =>
     {
-        EnsureDirectoryExists(packagesDir);
+		try
+		{
+			Information("DownloadGitHubReleaseArtifacts");
 
-		var releaseUrl = tagsUrl + releaseTag;
-        var assets_url = ParseJson(GetResource(releaseUrl))
-            .GetValue("assets_url")
-			.Value<string>();
+			EnsureDirectoryExists(packagesDir);
 
-        foreach(var asset in DeserializeJson<JArray>(GetResource(assets_url)))
-        {
-			var file = packagesDir + File(asset.Value<string>("name"));
-			Information("Downloading " + file);
-            DownloadFile(asset.Value<string>("browser_download_url"), file);
-        }
+			Information("Directory exists...");
+
+			var releaseUrl = tagsUrl + releaseTag;
+
+			Information("Release url " + releaseUrl);
+
+			//var releaseJson = Newtonsoft.Json.Linq.JObject.Parse(GetResource(releaseUrl));            
+
+        	var assets_url = Newtonsoft.Json.Linq.JObject.Parse(GetResource(releaseUrl))
+				.GetValue("assets_url")
+				.Value<string>();
+
+			Information("Assets url " + assets_url);
+
+			var assets = GetResource(assets_url);
+
+			Information("Assets " + assets_url);
+
+			foreach(var asset in Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(assets))
+			{
+				Information("In the loop..");
+
+				var file = packagesDir + File(asset.Value<string>("name"));
+
+				Information("Downloading " + file);
+				
+				DownloadFile(asset.Value<string>("browser_download_url"), file);
+			}
+
+			Information("Out of the loop...");
+		}
+		catch(Exception exception)
+		{
+			Information("There was an exception " + exception);
+			throw;
+		}
     });
 
 Task("ReleasePackagesToStableFeed")
@@ -301,22 +349,35 @@ private void PublishPackages(string feedApiKey, string codeFeedUrl, string symbo
             });
 }
 
+
 /// gets the resource from the specified url
 private string GetResource(string url)
 {
-	Information("Getting resource from " + url);
+	try
+	{
+		Information("Getting resource from " + url);
 
-    var assetsRequest = System.Net.WebRequest.CreateHttp(url);
-    assetsRequest.Method = "GET";
-    assetsRequest.Accept = "application/vnd.github.v3+json";
-    assetsRequest.UserAgent = "BuildScript";
+		var assetsRequest = System.Net.WebRequest.CreateHttp(url);
+		assetsRequest.Method = "GET";
+		assetsRequest.Accept = "application/vnd.github.v3+json";
+		assetsRequest.UserAgent = "BuildScript";
 
-    using (var assetsResponse = assetsRequest.GetResponse())
-    {
-        var assetsStream = assetsResponse.GetResponseStream();
-        var assetsReader = new StreamReader(assetsStream);
-        return assetsReader.ReadToEnd();
-    }
+		using (var assetsResponse = assetsRequest.GetResponse())
+		{
+			var assetsStream = assetsResponse.GetResponseStream();
+			var assetsReader = new StreamReader(assetsStream);
+			var response =  assetsReader.ReadToEnd();
+
+			Information("Response is " + response);
+			
+			return response;
+		}
+	}
+	catch(Exception exception)
+	{
+		Information("There was an exception " + exception);
+		throw;
+	}
 }
 
 private bool ShouldPublishToUnstableFeed()

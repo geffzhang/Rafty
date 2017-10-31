@@ -1,97 +1,180 @@
-using System;
-using System.Collections.Generic;
-using Microsoft.Extensions.Logging.Console;
-using Moq;
-using Rafty.AcceptanceTests;
-using Rafty.Commands;
-using Rafty.Messages;
-using Rafty.Messaging;
-using Rafty.Raft;
-using Rafty.ServiceDiscovery;
-using Rafty.State;
-using Shouldly;
-using TestStack.BDDfy;
-using Xunit;
+using System.Diagnostics;
+using System.Threading;
+using Castle.Components.DictionaryAdapter;
+using static Rafty.Infrastructure.Wait;
 
 namespace Rafty.UnitTests
 {
-    public class FollowerTests
+    using System;
+    using System.Collections.Generic;
+    using Concensus;
+    using Rafty.Concensus.States;
+    using Rafty.FiniteStateMachine;
+    using Rafty.Infrastructure;
+    using Rafty.Log;
+    using Shouldly;
+    using Xunit;
+
+    public class FollowerTests 
     {
-        private FakeMessageBus _messageBus;
-        private readonly Mock<IMessageBus> _messageBusMock;
-        private Server _server;
-        private IServersInCluster _serversInCluster;
-        private FakeStateMachine _fakeStateMachine;
+        private readonly IFiniteStateMachine _fsm;
+        private List<IPeer> _peers;
+        private readonly ILog _log;
+        private readonly IRandomDelay _random;
+        private INode _node;
+        private CurrentState _currentState;
+        private InMemorySettings _settings;
+        private IRules _rules;
+        private IPeersProvider _peersProvider;
 
         public FollowerTests()
         {
-            _messageBusMock = new Mock<IMessageBus>();
-            _serversInCluster = new InMemoryServersInCluster();
+            _rules = new Rules();
+            _settings = new InMemorySettingsBuilder().Build();
+            _random = new RandomDelay();
+            _log = new InMemoryLog();
+            _peers = new List<IPeer>();
+            _fsm = new InMemoryStateMachine();
+            _peersProvider = new InMemoryPeersProvider(_peers);
+            _currentState = new CurrentState(Guid.NewGuid(), 0, default(Guid), -1, -1, default(Guid));
         }
 
         [Fact]
-        public void server_should_start_in_follower_state()
+        public void CommitIndexShouldBeInitialisedToMinusOne()
         {
-            this.Given(x => GivenANewServer())
-                .Then(x => TheServerIsAFollower())
-                .And(x => ThenTheCurrentTermIs(0))
-                .BDDfy();
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.CurrentState.CommitIndex.ShouldBe(0);
         }
 
         [Fact]
-        public void server_should_become_candidate_if_election_timer_times_out()
+        public void CurrentTermShouldBeInitialisedToZero()
         {
-            this.Given(x => GivenANewServer())
-                .And(x => ThenTheServerReceivesBecomeCandidate())
-                .BDDfy();
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.CurrentState.CurrentTerm.ShouldBe(0);
         }
 
         [Fact]
-        public void server_should_forward_command_to_leader()
+        public void LastAppliedShouldBeInitialisedToZero()
         {
-            this.Given(x => GivenANewServer(_messageBusMock))
-                .When(x => ServerReceives(new FakeCommand(Guid.NewGuid())))
-                .Then(x => ThenTheCommandIsForwardedToTheLeader())
-                .BDDfy();
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.CurrentState.LastApplied.ShouldBe(0);
         }
 
-        private void ThenTheCommandIsForwardedToTheLeader()
+        [Fact]
+        public void ShouldBecomeCandidateWhenFollowerReceivesTimeoutAndHasNotHeardFromLeader()
         {
-            _messageBusMock.Verify(x => x.Send(It.IsAny<ICommand>(), It.IsAny<Guid>()), Times.Once);
+            _node = new TestingNode();
+            var node = (TestingNode)_node;
+            node.SetState(new Follower(_currentState, _fsm, _log, _random, node, new InMemorySettingsBuilder().WithMinTimeout(0).WithMaxTimeout(0).Build(),_rules, _peers));
+            var result = WaitFor(1000).Until(() => node.BecomeCandidateCount > 0);
+            result.ShouldBeTrue();
         }
 
-        private void ServerReceives(FakeCommand fakeCommand)
+        [Fact]
+        public void ShouldBecomeCandidateWhenFollowerReceivesTimeoutAndHasNotHeardFromLeaderSinceLastTimeout()
         {
-            _server.Receive(fakeCommand);
+            _node = new TestingNode();
+            var node = (TestingNode)_node;
+            node.SetState(new Follower(_currentState, _fsm, _log, _random, node, new InMemorySettingsBuilder().WithMinTimeout(0).WithMaxTimeout(0).Build(), _rules, _peers));
+            _node.Handle(new AppendEntriesBuilder().WithTerm(1).WithLeaderCommitIndex(-1).Build());
+            var result = WaitFor(1000).Until(() => node.BecomeCandidateCount > 0);
+            result.ShouldBeTrue();
         }
 
-        private void ThenTheServerReceivesBecomeCandidate()
+        [Fact]
+        public void ShouldNotBecomeCandidateWhenFollowerReceivesTimeoutAndHasHeardFromLeader()
         {
-            var sendToSelf = (SendToSelf)_messageBus.SendToSelfMessages[0];
-            sendToSelf.Message.ShouldBeOfType<BecomeCandidate>();
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.ShouldBeOfType<Follower>();
+            _node.Handle(new AppendEntriesBuilder().WithTerm(1).WithLeaderCommitIndex(-1).Build());
+            _node.State.ShouldBeOfType<Follower>();
         }
 
-        private void GivenANewServer()
+        [Fact]
+        public void ShouldNotBecomeCandidateWhenFollowerReceivesTimeoutAndHasHeardFromLeaderSinceLastTimeout()
         {
-            _fakeStateMachine = new FakeStateMachine();
-            _messageBus = new FakeMessageBus();
-            _server = new Server(_messageBus, _serversInCluster, _fakeStateMachine, new ConsoleLogger("ConsoleLogger", (x, y) => true, true));
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.ShouldBeOfType<Follower>();
+            _node.Handle(new AppendEntriesBuilder().WithTerm(1).WithLeaderCommitIndex(-1).Build());
+            _node.State.ShouldBeOfType<Follower>();
+            _node.Handle(new AppendEntriesBuilder().WithTerm(1).WithLeaderCommitIndex(-1).Build());
+            _node.State.ShouldBeOfType<Follower>();
         }
 
-        private void GivenANewServer(Mock<IMessageBus> mock)
+        [Fact]
+        public void ShouldStartAsFollower()
         {
-            _fakeStateMachine = new FakeStateMachine();
-            _server = new Server(mock.Object, _serversInCluster, _fakeStateMachine, new ConsoleLogger("ConsoleLogger", (x, y) => true, true));
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());
+            _node.State.ShouldBeOfType<Follower>();
         }
 
-        private void TheServerIsAFollower()
+        [Fact]
+        public void VotedForShouldBeInitialisedToNone()
         {
-            _server.State.ShouldBeOfType<Follower>();
+            _node = new Node(_fsm, _log, _settings, _peersProvider);
+            _node.Start(Guid.NewGuid());  
+            _node.State.CurrentState.VotedFor.ShouldBe(default(Guid));
         }
 
-        private void ThenTheCurrentTermIs(int expected)
+        [Fact]
+        public void ShouldUpdateVotedFor()
         {
-            _server.CurrentTerm.ShouldBe(expected);
+            _node = new NothingNode();
+            _currentState = new CurrentState(Guid.NewGuid(), 0, default(Guid), 0, 0, default(Guid));
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings, _rules, _peers);
+            var requestVote = new RequestVoteBuilder().WithCandidateId(Guid.NewGuid()).WithLastLogIndex(1).Build();
+            var requestVoteResponse = follower.Handle(requestVote);
+            follower.CurrentState.VotedFor.ShouldBe(requestVote.CandidateId);
+        }
+
+        [Fact]
+        public void ShouldVoteForNewCandidateInAnotherTermsElection()
+        {
+             _node = new NothingNode();
+            _currentState = new CurrentState(Guid.NewGuid(), 0, default(Guid), 0, 0, default(Guid));
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var requestVote = new RequestVoteBuilder().WithTerm(0).WithCandidateId(Guid.NewGuid()).WithLastLogIndex(1).Build();
+            var requestVoteResponse = follower.Handle(requestVote);
+            follower.CurrentState.VotedFor.ShouldBe(requestVote.CandidateId);
+            requestVoteResponse.VoteGranted.ShouldBeTrue();
+            requestVote = new RequestVoteBuilder().WithTerm(1).WithCandidateId(Guid.NewGuid()).WithLastLogIndex(1).Build();
+            requestVoteResponse = follower.Handle(requestVote);
+            requestVoteResponse.VoteGranted.ShouldBeTrue();
+            follower.CurrentState.VotedFor.ShouldBe(requestVote.CandidateId);
+        }
+
+        [Fact]
+        public void FollowerShouldForwardCommandToLeader()
+        {             
+            _node = new NothingNode();
+            var leaderId = Guid.NewGuid();
+            var leader = new FakePeer(leaderId);
+            _peers = new List<IPeer>
+            {
+                leader
+            };
+            _currentState = new CurrentState(_currentState.Id, _currentState.CurrentTerm, _currentState.VotedFor, _currentState.CommitIndex, _currentState.LastApplied, leaderId);
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var response = follower.Accept(new FakeCommand());
+            response.ShouldBeOfType<OkResponse<FakeCommand>>();
+            leader.ReceivedCommands.ShouldBe(1);
+        }
+
+        [Fact]
+        public void FollowerShouldReturnRetryIfNoLeader()
+        {             
+            _node = new NothingNode();
+            _currentState = new CurrentState(_currentState.Id, _currentState.CurrentTerm, _currentState.VotedFor, _currentState.CommitIndex, _currentState.LastApplied, _currentState.LeaderId);
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var response = follower.Accept(new FakeCommand());
+            var error = (ErrorResponse<FakeCommand>)response;
+            error.Error.ShouldBe("Please retry command later. Unable to find leader.");
         }
     }
 }

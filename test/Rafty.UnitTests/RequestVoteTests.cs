@@ -1,134 +1,88 @@
 ﻿using System;
 using System.Collections.Generic;
-using Microsoft.Extensions.Logging.Console;
-using Rafty.AcceptanceTests;
-using Rafty.Messages;
-using Rafty.Messaging;
-using Rafty.Raft;
-using Rafty.Responses;
-using Rafty.ServiceDiscovery;
-using Rafty.State;
+using System.Text;
+using Rafty.Concensus;
+using Rafty.Concensus.States;
+using Rafty.FiniteStateMachine;
+using Rafty.Log;
 using Shouldly;
-using TestStack.BDDfy;
 using Xunit;
 
 namespace Rafty.UnitTests
 {
-    public class RequestVoteTests
+    public class RequestVoteTests : IDisposable
     {
-        private Server _server;
-        private FakeMessageBus _messageBus;
-        private IServersInCluster _serversInCluster;
-        private FakeStateMachine _fakeStateMachine;
-        private RequestVoteResponse _result;
+/*
+1. Reply false if term<currentTerm (§5.1)
+2. If votedFor is null or candidateId, and candidate’s log is at
+least as up-to-date as receiver’s log, grant vote(§5.2, §5.4)
+*/
+        private readonly INode _node;
+        private CurrentState _currentState;
+        private IFiniteStateMachine _fsm;
+        private List<IPeer> _peers;
+        private readonly ILog _log;
+        private readonly IRandomDelay _random;
+        private InMemorySettings _settings;
+        private IRules _rules;
 
         public RequestVoteTests()
         {
-            _serversInCluster = new InMemoryServersInCluster();
+            _rules = new Rules();
+            _settings = new InMemorySettingsBuilder().Build();
+            _random = new RandomDelay();
+            _log = new InMemoryLog();
+            _peers = new List<IPeer>();
+            _node = new NothingNode();
+        }
+
+        public void Dispose()
+        {
+            //_node.Dispose();
         }
 
         [Fact]
-        public void server_should_reply_false_if_term_is_less_than_current_term()
+        public void FollowerShouldReplyFalseIfTermIsLessThanCurrentTerm()
         {
-            var requestVote = new RequestVote(1, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-            var expected = new RequestVoteResponse(2, false, Guid.NewGuid(), Guid.NewGuid());
-
-            this.Given(x => GivenANewServer())
-                .And(x => GivenTheCurrentTermIs(2))
-                .When(x => WhenServerReceives(requestVote))
-                .Then(x => x.ThenTheReplyIs(expected))
-                .BDDfy();
+            _currentState = new CurrentState(Guid.NewGuid(), 1, default(Guid), 1, 0, default(Guid));
+            var requestVoteRpc = new RequestVoteBuilder().WithTerm(0).Build();
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var requestVoteResponse = follower.Handle(requestVoteRpc);
+            requestVoteResponse.VoteGranted.ShouldBe(false);
+            requestVoteResponse.Term.ShouldBe(1);
         }
 
         [Fact]
-        public void server_should_reply_true_if_voted_for_is_null()
+        public void FollowerShouldReplyFalseIfVotedForIsNotDefault()
         {
-            var requestVote = new RequestVote(1, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-            var expected = new RequestVoteResponse(1, true, Guid.NewGuid(), Guid.NewGuid());
-
-            this.Given(x => GivenANewServer())
-                .When(x => WhenServerReceives(requestVote))
-                .Then(x => x.ThenTheReplyIs(expected))
-                .BDDfy();
+            _currentState = new CurrentState(Guid.NewGuid(), 1, Guid.NewGuid(), 1, 0, default(Guid));
+            var requestVoteRpc = new RequestVoteBuilder().WithTerm(0).Build();
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var requestVoteResponse = follower.Handle(requestVoteRpc);
+            requestVoteResponse.VoteGranted.ShouldBe(false);
+            requestVoteResponse.Term.ShouldBe(1);
         }
 
         [Fact]
-        public void server_should_reply_false_if_voted_for_is_another_candidate()
+        public void FollowerShouldReplyFalseIfVotedForIsNotCandidateId()
         {
-            var firstRequestVote = new RequestVote(1, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-            var secondRequestVote = new RequestVote(1, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-
-            var expected = new RequestVoteResponse(1, false, Guid.NewGuid(), Guid.NewGuid());
-
-            this.Given(x => GivenANewServer())
-                .And(x => GivenTheServerReceives(firstRequestVote))
-                .When(x => WhenServerReceives(secondRequestVote))
-                .Then(x => x.ThenTheReplyIs(expected))
-                .BDDfy();
+            _currentState = new CurrentState(Guid.NewGuid(), 1, Guid.NewGuid(), 1, 0, default(Guid));
+            var requestVoteRpc = new RequestVoteBuilder().WithCandidateId(Guid.NewGuid()).WithTerm(0).Build();
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var requestVoteResponse = follower.Handle(requestVoteRpc);
+            requestVoteResponse.VoteGranted.ShouldBe(false);
+            requestVoteResponse.Term.ShouldBe(1);
         }
 
         [Fact]
-        public void server_should_reply_true_if_candidate_id_and_log_is_up_to_date_with_server()
+        public void FollowerShouldGrantVote()
         {
-            var firstRequestVote = new RequestVote(1, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-
-            var expected = new RequestVoteResponse(1, true, Guid.NewGuid(), Guid.NewGuid());
-
-            this.Given(x => GivenANewServer())
-                .When(x => WhenServerReceives(firstRequestVote))
-                .Then(x => x.ThenTheReplyIs(expected))
-                .BDDfy();
-        }
-
-        [Fact]
-        public void server_should_reply_false_if_candidate_id_and_log_is_not_up_to_date_with_server()
-        {
-            var firstRequestVote = new RequestVote(0, Guid.NewGuid(), 0, 0, Guid.NewGuid());
-
-            var expected = new RequestVoteResponse(1, false, Guid.NewGuid(), Guid.NewGuid());
-
-            this.Given(x => GivenANewServer())
-                .And(x => GivenTheCandidatesLogIsAtIndex(1))
-                .When(x => WhenServerReceives(firstRequestVote))
-                .Then(x => x.ThenTheReplyIs(expected))
-                .BDDfy();
-        }
-
-        private void GivenTheCandidatesLogIsAtIndex(int index)
-        {
-            var entries = new Log(1, new FakeCommand(Guid.NewGuid()));
-
-            var appendEntries = new AppendEntries(1, Guid.NewGuid(), index, 0, entries, 0, Guid.NewGuid());
-
-            _server.Receive(appendEntries);
-        }
-
-        private void ThenTheReplyIs(RequestVoteResponse expected)
-        {
-            _result.Term.ShouldBe(expected.Term);
-            _result.VoteGranted.ShouldBe(expected.VoteGranted);
-        }
-
-        private void GivenTheServerReceives(RequestVote requestVote)
-        {
-            WhenServerReceives(requestVote);
-        }
-
-        private void WhenServerReceives(RequestVote requestVote)
-        {
-            _result = _server.Receive(requestVote);
-        }
-
-        private void GivenANewServer()
-        {
-            _fakeStateMachine = new FakeStateMachine();
-            _messageBus = new FakeMessageBus();
-            _server = new Server(_messageBus, _serversInCluster, _fakeStateMachine, new ConsoleLogger("ConsoleLogger", (x, y) => true, true));
-        }
-
-        private void GivenTheCurrentTermIs(int term)
-        {
-            _server.Receive(new AppendEntries(term, Guid.NewGuid(), 0, 0, null, 0, Guid.NewGuid()));
+            _currentState = new CurrentState(Guid.NewGuid(), 1, default(Guid), 1, 0, default(Guid));
+            var requestVoteRpc = new RequestVoteBuilder().WithLastLogIndex(1).WithLastLogTerm(0).WithTerm(1).Build();
+            var follower = new Follower(_currentState, _fsm, _log, _random, _node, _settings,_rules, _peers);
+            var requestVoteResponse = follower.Handle(requestVoteRpc);
+            requestVoteResponse.VoteGranted.ShouldBe(true);
+            requestVoteResponse.Term.ShouldBe(1);
         }
     }
 }

@@ -4,7 +4,11 @@ namespace Rafty.UnitTests
 {
     using System;
     using System.Collections.Generic;
+    using System.Threading.Tasks;
     using Concensus;
+    using Concensus.Messages;
+    using Concensus.Peers;
+    using Infrastructure;
 
     internal class FakePeer : IPeer
     {
@@ -13,14 +17,14 @@ namespace Rafty.UnitTests
         private readonly bool _appendEntryTwo;
         private bool _appendEntryThree;
         private int _term = 1;
-        private Guid _id;
+        private string _id;
         public int ReceivedCommands;
 
         public FakePeer()
         {
         }
 
-        public FakePeer(Guid id)
+        public FakePeer(string id)
         {
             _id = id;
         }
@@ -30,7 +34,7 @@ namespace Rafty.UnitTests
             _term = term;
         }
 
-        public FakePeer(int term, Guid id)
+        public FakePeer(int term, string id)
         {
             _term = term;
             _id = id;
@@ -66,16 +70,16 @@ namespace Rafty.UnitTests
 
         public List<AppendEntriesResponse> AppendEntriesResponses { get; } = new List<AppendEntriesResponse>();
 
-        public Guid Id => _id;
+        public string Id => _id;
 
-        public RequestVoteResponse Request(RequestVote requestVote)
+        public async Task<RequestVoteResponse> Request(RequestVote requestVote)
         {
             var response = new RequestVoteResponse(_grantVote, _term);
             RequestVoteResponses.Add(response);
             return response;
         }
 
-        public AppendEntriesResponse Request(AppendEntries appendEntries)
+        public async Task<AppendEntriesResponse> Request(AppendEntries appendEntries)
         {
             AppendEntriesResponse response;
             if (AppendEntriesResponses.Count == 1)
@@ -97,7 +101,7 @@ namespace Rafty.UnitTests
             return response;
         }
 
-        public Response<T> Request<T>(T command) where T : ICommand
+        public async Task<Response<T>> Request<T>(T command) where T : ICommand
         {
             ReceivedCommands++;
             return new OkResponse<T>(command);

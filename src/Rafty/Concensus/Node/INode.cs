@@ -1,18 +1,21 @@
-﻿using System;
-using Rafty.FiniteStateMachine;
-
-namespace Rafty.Concensus
+﻿namespace Rafty.Concensus.Node
 {
+    using System.Threading.Tasks;
+    using FiniteStateMachine;
+    using Infrastructure;
+    using Messages;
+    using States;
+
     public interface INode
     {
         IState State { get; }
         void BecomeLeader(CurrentState state);
         void BecomeFollower(CurrentState state);
         void BecomeCandidate(CurrentState state);
-        AppendEntriesResponse Handle(AppendEntries appendEntries);
-        RequestVoteResponse Handle(RequestVote requestVote);
-        void Start(Guid id);
+        Task<AppendEntriesResponse> Handle(AppendEntries appendEntries);
+        Task<RequestVoteResponse> Handle(RequestVote requestVote);
+        void Start(NodeId id);
         void Stop();
-        Response<T> Accept<T>(T command) where T : ICommand;
+        Task<Response<T>> Accept<T>(T command) where T : ICommand;
     }
 }

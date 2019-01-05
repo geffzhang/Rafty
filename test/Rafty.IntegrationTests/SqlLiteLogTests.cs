@@ -1,124 +1,150 @@
-namespace Rafty.UnitTests
+namespace Rafty.IntegrationTests
 {
     using System;
     using System.IO;
+    using System.Threading.Tasks;
+    using Infrastructure;
     using Log;
-    using Rafty.Infrastructure;
-    using Rafty.IntegrationTests;
+    using Microsoft.Extensions.Logging;
+    using Moq;
     using Shouldly;
     using Xunit;
 
     public class SqlLiteLogTests : IDisposable
     {
         private SqlLiteLog _log;
-        private Guid _id;
+        private string _id;
+
 
         public SqlLiteLogTests()
         {
-            _id = Guid.NewGuid();
-            _log = new SqlLiteLog(new NodeId(_id));
+            var factory = new Mock<ILoggerFactory>();
+            var logger = new Mock<ILogger>();
+            factory.Setup(x => x.CreateLogger(It.IsAny<string>())).Returns(logger.Object);
+            _id = Guid.NewGuid().ToString();
+            _log = new SqlLiteLog(new NodeId(_id), factory.Object);
         }
 
         [Fact]
         public void ShouldInitialiseCorrectly()
         {
             var path = Guid.NewGuid().ToString();
-            _log.LastLogIndex.ShouldBe(1);
-            _log.LastLogTerm.ShouldBe(0);
+            _log.LastLogIndex().Result.ShouldBe(1);
+            _log.LastLogTerm().Result.ShouldBe(0);
         }
 
         [Fact]
-        public void ShouldApplyLog()
+        public async Task ShouldApplyLog()
         {
-            var index = _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            var index = await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
             index.ShouldBe(1);
         }
 
         [Fact]
-        public void ShouldSetLastLogIndex()
+        public async Task ShouldSetLastLogIndex()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.LastLogIndex.ShouldBe(2);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            _log.LastLogIndex().Result.ShouldBe(2);
         }
 
         [Fact]
-        public void ShouldSetLastLogTerm()
+        public async Task ShouldSetLastLogTerm()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 2));
-            _log.LastLogTerm.ShouldBe(2);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 2));
+            _log.LastLogTerm().Result.ShouldBe(2);
         }
 
         [Fact]
-        public void ShouldGetTermAtIndex()
+        public async Task ShouldGetTermAtIndex()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.GetTermAtIndex(1).ShouldBe(1);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            _log.GetTermAtIndex(1).Result.ShouldBe(1);
         }
 
         [Fact]
-        public void ShouldDeleteConflict()
+        public async Task ShouldDeleteConflict()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 2));
-            _log.Count.ShouldBe(0);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 2));
+            _log.Count().Result.ShouldBe(0);
         }
 
         [Fact]
-        public void ShouldNotDeleteConflict()
+        public async Task ShouldNotDeleteConflict()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Count.ShouldBe(1);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            _log.Count().Result.ShouldBe(1);
         }
 
         [Fact]
-        public void ShouldDeleteConflictAndSubsequentLogs()
+        public async Task ShouldDeleteConflictAndSubsequentLogs()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 2));
-            _log.Count.ShouldBe(0);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.DeleteConflictsFromThisLog(1, new LogEntry(new FakeCommand("test"), typeof(string), 2));
+            _log.Count().Result.ShouldBe(0);
         }
 
         [Fact]
-        public void ShouldDeleteConflictAndSubsequentLogsFromMidPoint()
+        public async Task ShouldDeleteConflictAndSubsequentLogsFromMidPoint()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.DeleteConflictsFromThisLog(4, new LogEntry(new FakeCommand("test"), typeof(string), 2));
-            _log.Count.ShouldBe(3);
-            _log.Get(1).Term.ShouldBe(1);
-            _log.Get(2).Term.ShouldBe(1);
-            _log.Get(3).Term.ShouldBe(1);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.DeleteConflictsFromThisLog(4, new LogEntry(new FakeCommand("test"), typeof(string), 2));
+            _log.Count().Result.ShouldBe(3);
+            _log.Get(1).Result.Term.ShouldBe(1);
+            _log.Get(2).Result.Term.ShouldBe(1);
+            _log.Get(3).Result.Term.ShouldBe(1);
         }
 
         [Fact]
-        public void ShouldGetFrom()
+        public async Task ShouldGetFrom()
         {
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            var logs = _log.GetFrom(3);
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            var logs = await _log.GetFrom(3);
             logs.Count.ShouldBe(3);
         }
 
         [Fact]
-        public void ShouldRemoveFromLog()
+        public async Task ShouldRemoveFromLog()
         {
-            var index = _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
-            _log.Remove(index);
-            _log.Count.ShouldBe(0);
+            var index = await _log.Apply(new LogEntry(new FakeCommand("test"), typeof(string), 1));
+            await _log.Remove(index);
+            _log.Count().Result.ShouldBe(0);
         }
+
+        [Fact]
+        public async Task ShouldBeDuplicate()
+        {
+            var entry = new LogEntry(new FakeCommand("test"), typeof(string), 1);
+            var index = await _log.Apply(entry);
+            var result = await _log.IsDuplicate(index, entry);
+            result.ShouldBeTrue();
+        }
+
+        [Fact]
+        public async Task ShouldNotBeDuplicate()
+        {
+            var entry = new LogEntry(new FakeCommand("test"), typeof(string), 1);
+            var index = await _log.Apply(entry);
+            var newEntry = new LogEntry(new FakeCommand("test"), typeof(string), 2);
+            var result = await _log.IsDuplicate(index, newEntry);
+            result.ShouldBeFalse();        
+        }
+
         public void Dispose()
         {
-            File.Delete($"{_id.ToString()}.db");
+            File.Delete($"{_id}.db");
         }
     }
 }

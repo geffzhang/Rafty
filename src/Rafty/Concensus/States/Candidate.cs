@@ -1,16 +1,19 @@
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Rafty.Concensus.States;
-using Rafty.FiniteStateMachine;
-using Rafty.Log;
-
-namespace Rafty.Concensus
+namespace Rafty.Concensus.States
 {
+    using System;
+    using System.Collections.Concurrent;
+    using System.Collections.Generic;
+    using System.Linq;
+    using System.Threading;
+    using System.Threading.Tasks;
+    using FiniteStateMachine;
+    using Infrastructure;
+    using Log;
+    using Messages;
+    using Microsoft.Extensions.Logging;
+    using Node;
+    using Peers;
+
     public sealed class Candidate : IState
     {
         private readonly IFiniteStateMachine _fsm;
@@ -26,6 +29,9 @@ namespace Rafty.Concensus
         private bool _requestVoteResponseWithGreaterTerm;
         private int _votesThisElection;
         private readonly object _lock = new object();
+        private int _applied;
+        private ILogger<Candidate> _logger;
+        private bool _doingElection;
 
         public Candidate(
             CurrentState currentState, 
@@ -35,8 +41,18 @@ namespace Rafty.Concensus
             IRandomDelay random, 
             INode node, 
             ISettings settings,
-            IRules rules)
+            IRules rules,
+            ILoggerFactory loggerFactory)
         {
+            try
+            {
+                _logger = loggerFactory.CreateLogger<Candidate>();
+            }
+            catch (ObjectDisposedException e)
+            {
+                //happens because asp.net shuts down services sometimes before onshutdown
+            }
+
             _rules = rules;
             _random = random;
             _node = node;
@@ -75,7 +91,7 @@ namespace Rafty.Concensus
             BecomeFollower();
         }
 
-        public AppendEntriesResponse Handle(AppendEntries appendEntries)
+        public async Task<AppendEntriesResponse> Handle(AppendEntries appendEntries)
         {
             var response = _rules.AppendEntriesTermIsLessThanCurrentTerm(appendEntries, CurrentState);
 
@@ -84,20 +100,29 @@ namespace Rafty.Concensus
                 return response.appendEntriesResponse;
             }
 
-            response = _rules.LogDoesntContainEntryAtPreviousLogIndexWhoseTermMatchesPreviousLogTerm(appendEntries, _log, CurrentState);
+            response = await _rules.LogDoesntContainEntryAtPreviousLogIndexWhoseTermMatchesPreviousLogTerm(appendEntries, _log, CurrentState);
 
             if(response.shouldReturn)
             {
                 return response.appendEntriesResponse;
             }
           
-            _rules.DeleteAnyConflictsInLog(appendEntries, _log);
+            await _rules.DeleteAnyConflictsInLog(appendEntries, _log);
 
-            _rules.ApplyEntriesToLog(appendEntries, _log);
+            if (_applied > 1 && appendEntries.Entries.Any())
+            {
+                Console.WriteLine("WTF?");
+            }
 
-            var commitIndexAndLastApplied = _rules.CommitIndexAndLastApplied(appendEntries, _log, CurrentState);
+            _applied++;
 
-            ApplyToStateMachine(commitIndexAndLastApplied.commitIndex, commitIndexAndLastApplied.lastApplied);
+            _logger.LogInformation($"{CurrentState.Id} as {nameof(Candidate)} applying entry to log");
+
+            await _rules.ApplyNewEntriesToLog(appendEntries, _log);
+
+            var commitIndexAndLastApplied = await _rules.CommitIndexAndLastApplied(appendEntries, _log, CurrentState);
+
+            await ApplyToStateMachine(commitIndexAndLastApplied.commitIndex, commitIndexAndLastApplied.lastApplied);
 
             SetLeaderId(appendEntries);
             
@@ -106,7 +131,7 @@ namespace Rafty.Concensus
             return new AppendEntriesResponse(CurrentState.CurrentTerm, true);
         }
         
-        public RequestVoteResponse Handle(RequestVote requestVote)
+        public async Task<RequestVoteResponse> Handle(RequestVote requestVote)
         {
             var response = RequestVoteTermIsGreaterThanCurrentTerm(requestVote);
 
@@ -129,7 +154,7 @@ namespace Rafty.Concensus
                 return response.requestVoteResponse;
             }
 
-            response = LastLogIndexAndLastLogTermMatchesThis(requestVote);
+            response = await LastLogIndexAndLastLogTermMatchesThis(requestVote);
 
             if(response.shouldReturn)
             {
@@ -139,8 +164,9 @@ namespace Rafty.Concensus
             return new RequestVoteResponse(false, CurrentState.CurrentTerm);
         }
 
-        public Response<T> Accept<T>(T command) where T : ICommand
+        public async Task<Response<T>> Accept<T>(T command) where T : ICommand
         {
+            _logger.LogInformation("candidate dont forward to leader");
            return new ErrorResponse<T>("Please retry command later. Currently electing new a new leader.", command);
         }
 
@@ -234,7 +260,7 @@ namespace Rafty.Concensus
 
         private async Task RequestVote(IPeer peer, BlockingCollection<RequestVoteResponse> requestVoteResponses) 
         {
-            var requestVoteResponse = peer.Request(new RequestVote(CurrentState.CurrentTerm, CurrentState.Id, _log.LastLogIndex, _log.LastLogTerm));
+            var requestVoteResponse = await peer.Request(new RequestVote(CurrentState.CurrentTerm, CurrentState.Id, await _log.LastLogIndex(), await _log.LastLogTerm()));
             requestVoteResponses.Add(requestVoteResponse);
         }
 
@@ -261,18 +287,27 @@ namespace Rafty.Concensus
             _electionTimer?.Dispose();
             _electionTimer = new Timer(x =>
             {
+                if (_doingElection)
+                {
+                    return;
+                }
+
+                _doingElection = true;
+
                 ElectionTimerExpired();
+
+                _doingElection = false;
 
             }, null, Convert.ToInt32(timeout.TotalMilliseconds), Convert.ToInt32(timeout.TotalMilliseconds));
         }
         
-        private void ApplyToStateMachine(int commitIndex, int lastApplied)
+        private async Task ApplyToStateMachine(int commitIndex, int lastApplied)
         {
             while (commitIndex > lastApplied)
             {
                 lastApplied++;
-                var log = _log.Get(lastApplied);
-                _fsm.Handle(log);
+                var log = await _log.Get(lastApplied);
+                await _fsm.Handle(log);
             }
 
             CurrentState = new CurrentState(CurrentState.Id, CurrentState.CurrentTerm,
@@ -303,10 +338,10 @@ namespace Rafty.Concensus
             return (null, false);
         }
 
-        private (RequestVoteResponse requestVoteResponse, bool shouldReturn) LastLogIndexAndLastLogTermMatchesThis(RequestVote requestVote)
+        private async Task<(RequestVoteResponse requestVoteResponse, bool shouldReturn)> LastLogIndexAndLastLogTermMatchesThis(RequestVote requestVote)
         {
-             if (requestVote.LastLogIndex == _log.LastLogIndex &&
-                requestVote.LastLogTerm == _log.LastLogTerm)
+             if (requestVote.LastLogIndex == await _log.LastLogIndex() &&
+                requestVote.LastLogTerm == await _log.LastLogTerm())
             {
                 CurrentState = new CurrentState(CurrentState.Id, CurrentState.CurrentTerm, requestVote.CandidateId, CurrentState.CommitIndex, CurrentState.LastApplied, CurrentState.LeaderId);
                 BecomeFollower();

@@ -7,6 +7,8 @@ using Rafty.Infrastructure;
 
 namespace Rafty.IntegrationTests
 {
+    using Concensus.Peers;
+
     public class FilePeersProvider : IPeersProvider
     {
         private readonly IOptions<FilePeers> _options;
@@ -19,7 +21,7 @@ namespace Rafty.IntegrationTests
             foreach (var item in _options.Value.Peers)
             {
                 var httpClient = new HttpClient();
-                var httpPeer = new HttpPeer(item.HostAndPort, Guid.Parse(item.Id), httpClient);
+                var httpPeer = new HttpPeer(item.HostAndPort, httpClient);
                 _peers.Add(httpPeer);
             }
         }

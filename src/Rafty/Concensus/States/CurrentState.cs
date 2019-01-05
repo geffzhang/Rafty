@@ -1,12 +1,10 @@
-namespace Rafty.Concensus
+namespace Rafty.Concensus.States
 {
     using System;
-    using System.Collections.Generic;
-    using Rafty.Log;
 
     public class CurrentState
     {
-        public CurrentState(Guid id, long currentTerm, Guid votedFor, int commitIndex, int lastApplied, Guid leaderId)
+        public CurrentState(string id, long currentTerm, string votedFor, int commitIndex, int lastApplied, string leaderId)
         {
             Id = id;
             CurrentTerm = currentTerm;
@@ -17,11 +15,11 @@ namespace Rafty.Concensus
         }
 
         public long CurrentTerm { get; private set; }
-        public Guid VotedFor { get; private set; }
+        public string VotedFor { get; private set; }
         public int CommitIndex { get; private set; }
         public int LastApplied { get; private set; }
         public Uri Address { get; private set; }
-        public Guid Id { get; private set; }
-        public Guid LeaderId { get; private set; }
+        public string Id { get; private set; }
+        public string LeaderId { get; private set; }
     }
 }

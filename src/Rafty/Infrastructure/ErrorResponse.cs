@@ -1,4 +1,4 @@
-namespace Rafty.Concensus
+namespace Rafty.Infrastructure
 {
     public class ErrorResponse<T> : Response<T>
     {
@@ -8,6 +8,6 @@ namespace Rafty.Concensus
             Error = error;
         }
 
-        public string Error {get;private set;}
+        public string Error { get; private set; }
     }
 }

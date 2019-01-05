@@ -4,19 +4,25 @@ using Rafty.FiniteStateMachine;
 
 namespace Rafty.UnitTests
 {
+    using System.Threading.Tasks;
+    using Concensus.Messages;
+    using Concensus.Peers;
+    using Infrastructure;
+
     public class RemoteControledPeer : IPeer
     {
         private RequestVoteResponse _requestVoteResponse;
         private AppendEntriesResponse _appendEntriesResponse;
         public int RequestVoteResponses { get; private set; }
         public int AppendEntriesResponses { get; private set; }
+        public int AppendEntriesResponsesWithLogEntries {get;private set;}
 
         public RemoteControledPeer()
         {
-            Id = Guid.NewGuid();
+            Id = Guid.NewGuid().ToString();
         }
 
-        public Guid Id { get; }
+        public string Id { get; }
 
         public void SetRequestVoteResponse(RequestVoteResponse requestVoteResponse)
         {
@@ -28,19 +34,23 @@ namespace Rafty.UnitTests
             _appendEntriesResponse = appendEntriesResponse;
         }
 
-        public RequestVoteResponse Request(RequestVote requestVote)
+        public async Task<RequestVoteResponse> Request(RequestVote requestVote)
         {
             RequestVoteResponses++;
             return _requestVoteResponse;
         }
 
-        public AppendEntriesResponse Request(AppendEntries appendEntries)
+        public async Task<AppendEntriesResponse> Request(AppendEntries appendEntries)
         {
+            if(appendEntries.Entries.Count > 0)
+            {
+                AppendEntriesResponsesWithLogEntries++;
+            }
             AppendEntriesResponses++;
             return _appendEntriesResponse;
         }
 
-        public Response<T> Request<T>(T command) where T : ICommand
+        public async Task<Response<T>> Request<T>(T command) where T : ICommand
         {
             throw new NotImplementedException();
         }

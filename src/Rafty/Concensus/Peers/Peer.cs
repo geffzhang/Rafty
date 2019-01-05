@@ -1,24 +1,26 @@
-using Rafty.FiniteStateMachine;
-
-namespace Rafty.Concensus
+namespace Rafty.Concensus.Peers
 {
     using System;
+    using System.Threading.Tasks;
+    using FiniteStateMachine;
+    using Infrastructure;
+    using Messages;
 
     public class Peer : IPeer
     {
-        public Guid Id => throw new NotImplementedException();
+        public string Id => throw new NotImplementedException();
 
-        public RequestVoteResponse Request(RequestVote requestVote)
+        public Task<RequestVoteResponse> Request(RequestVote requestVote)
         {
             throw new NotImplementedException();
         }
 
-        public AppendEntriesResponse Request(AppendEntries appendEntries)
+        public Task<AppendEntriesResponse> Request(AppendEntries appendEntries)
         {
             throw new NotImplementedException();
         }
 
-        public Response<T> Request<T>(T command) where T : ICommand
+        public Task<Response<T>> Request<T>(T command) where T : ICommand
         {
             throw new NotImplementedException();
         }

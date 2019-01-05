@@ -1,12 +1,13 @@
-namespace Rafty.Concensus
+namespace Rafty.Concensus.Messages
 {
     using System;
     using System.Collections.Generic;
+    using Infrastructure;
     using Log;
 
     public sealed class AppendEntries : Message
     {
-        public AppendEntries(long term, Guid leaderId, int previousLogIndex, long previousLogTerm,
+        public AppendEntries(long term, string leaderId, int previousLogIndex, long previousLogTerm,
             List<LogEntry> entries, int leaderCommitIndex)
             : base(Guid.NewGuid())
         {
@@ -26,7 +27,7 @@ namespace Rafty.Concensus
         /// <summary>
         // LeaderId so follower can redirect clients.
         /// </summary>
-        public Guid LeaderId { get; private set; }
+        public string LeaderId { get; private set; }
 
         /// <summary>
         // PrevLogIndex index of log entry immediately preceding new ones.

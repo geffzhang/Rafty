@@ -4,6 +4,12 @@ using Rafty.FiniteStateMachine;
 
 namespace Rafty.UnitTests
 {
+    using System.Threading.Tasks;
+    using Concensus.Messages;
+    using Concensus.Node;
+    using Concensus.States;
+    using Infrastructure;
+
     public class NothingNode : INode
     {
         public IState State { get; }
@@ -27,17 +33,17 @@ namespace Rafty.UnitTests
             BecomeCandidateCount++;
         }
 
-        public AppendEntriesResponse Handle(AppendEntries appendEntries)
+        public async Task<AppendEntriesResponse> Handle(AppendEntries appendEntries)
         {
             return new AppendEntriesResponseBuilder().Build();
         }
 
-        public RequestVoteResponse Handle(RequestVote requestVote)
+        public async Task<RequestVoteResponse> Handle(RequestVote requestVote)
         {
             return new RequestVoteResponseBuilder().Build();
         }
 
-        public void Start(Guid id)
+        public void Start(NodeId id)
         {
             throw new System.NotImplementedException();
         }
@@ -47,7 +53,7 @@ namespace Rafty.UnitTests
             throw new System.NotImplementedException();
         }
 
-        public Response<T> Accept<T>(T command) where T : ICommand
+        public async Task<Response<T>> Accept<T>(T command) where T : ICommand
         {
             throw new System.NotImplementedException();
         }

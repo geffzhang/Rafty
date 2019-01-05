@@ -1,31 +1,34 @@
-namespace Rafty.Concensus
-{  
+namespace Rafty.Concensus.States
+{
+    using System;
     using System.Collections.Concurrent;
+    using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
     using System.Threading;
-    using System;
-    using System.Collections.Generic;
     using System.Threading.Tasks;
-    using Newtonsoft.Json;
-    using Rafty.Concensus.States;
-    using Rafty.FiniteStateMachine;
-    using Rafty.Log;
-    using System.Diagnostics;
+    using FiniteStateMachine;
+    using Infrastructure;
+    using Log;
+    using Messages;
+    using Microsoft.Extensions.Logging;
+    using Node;
+    using Peers;
 
     public sealed class Leader : IState
     {
         private readonly IFiniteStateMachine _fsm;
-        Func<CurrentState, List<IPeer>> _getPeers;
+        readonly Func<CurrentState, List<IPeer>> _getPeers;
         private readonly ILog _log;
         private readonly INode _node;
         private readonly ISettings _settings;
         private IRules _rules;
-        private readonly object _lock = new object();
         private bool _handled;
         private Stopwatch _stopWatch;
         private Timer _electionTimer;
         public long SendAppendEntriesCount;
         private bool _appendingEntries;
+        private readonly ILogger<Leader> _logger;
 
         public Leader(
             CurrentState currentState, 
@@ -34,8 +37,10 @@ namespace Rafty.Concensus
             ILog log, 
             INode node, 
             ISettings settings,
-            IRules rules)
+            IRules rules,
+            ILoggerFactory loggerFactory)
         {
+            _logger = loggerFactory.CreateLogger<Leader>();
             _rules = rules;
             _settings = settings;
             _node = node;
@@ -56,29 +61,31 @@ namespace Rafty.Concensus
             _electionTimer.Dispose();
         }
 
-        public Response<T> Accept<T>(T command) where T : ICommand
+        public async Task<Response<T>> Accept<T>(T command) where T : ICommand
         {
-            var indexOfCommand = AddCommandToLog(command);
+            _logger.LogInformation($"{CurrentState.Id} leader accepted command");
+
+            var indexOfCommand = await AddCommandToLog(command);
             
             var peers = _getPeers(CurrentState);
             
             if(No(peers))
             {
-                var log = _log.Get(indexOfCommand);
-                ApplyToStateMachineAndUpdateCommitIndex(log);
+                var log = await _log.Get(indexOfCommand);
+                await ApplyToStateMachineAndUpdateCommitIndex(log);
                 return Ok(command);
             }
 
-            return Replicate(command, indexOfCommand);
+            return await Replicate(command, indexOfCommand);
         }
 
-        public AppendEntriesResponse Handle(AppendEntries appendEntries)
+        public async Task<AppendEntriesResponse> Handle(AppendEntries appendEntries)
         {
             if (appendEntries.Term > CurrentState.CurrentTerm)
             {
-                var response = _rules.CommitIndexAndLastApplied(appendEntries, _log, CurrentState);
+                var response = await _rules.CommitIndexAndLastApplied(appendEntries, _log, CurrentState);
 
-                ApplyToStateMachine(appendEntries, response.commitIndex, response.lastApplied);
+                await ApplyToStateMachine(appendEntries, response.commitIndex, response.lastApplied);
 
                 SetLeaderId(appendEntries);
 
@@ -90,7 +97,7 @@ namespace Rafty.Concensus
             return new AppendEntriesResponse(CurrentState.CurrentTerm, false);
         }
 
-        public RequestVoteResponse Handle(RequestVote requestVote)
+        public async Task<RequestVoteResponse> Handle(RequestVote requestVote)
         {    
             var response = RequestVoteTermIsGreaterThanCurrentTerm(requestVote);
 
@@ -109,17 +116,33 @@ namespace Rafty.Concensus
             return responses;
         }
 
-        private AppendEntriesResponse GetAppendEntriesResponse(PeerState p, List<(int, LogEntry logEntry)> logsToSend)
+        private async Task<AppendEntriesResponse> GetAppendEntriesResponse(PeerState p, List<(int, LogEntry logEntry)> logsToSend)
         {
-            var appendEntriesResponse = p.Peer.Request(new AppendEntries(CurrentState.CurrentTerm, CurrentState.Id, _log.LastLogIndex, _log.LastLogTerm, logsToSend.Select(x => x.logEntry).ToList(), CurrentState.CommitIndex));
+            var appendEntriesResponse = await p.Peer.Request(new AppendEntries(CurrentState.CurrentTerm, CurrentState.Id, await _log.LastLogIndex(), await _log.LastLogTerm(), logsToSend.Select(x => x.logEntry).ToList(), CurrentState.CommitIndex));
+
+            if (logsToSend.Any())
+            {
+                _logger.LogInformation($"id: {CurrentState.Id} received append entries failure from peer: {p.Peer.Id}");
+            }
+
             return appendEntriesResponse;
         }
 
         private void UpdatePeerIndexes(PeerState p, List<(int index, LogEntry logEntry)> logsToSend)
         {
+            _logger.LogInformation($"leaderid: {CurrentState.Id}, logs to send count {logsToSend.Count} to id: {p.Peer.Id}");
+
+            if(logsToSend.Any())
+            {
+                _logger.LogInformation($"leaderid: {CurrentState.Id}, replicated - index: {logsToSend[0].index}, id: {p.Peer.Id}");
+            }
             var newMatchIndex =
                 Math.Max(p.MatchIndex.IndexOfHighestKnownReplicatedLog, logsToSend.Count > 0 ? logsToSend.Max(x => x.index) : 0);
             var newNextIndex = newMatchIndex + 1;
+            
+            _logger.LogInformation($"leaderid: {CurrentState.Id}, id: {p.Peer.Id}, newMatchIndex: {newMatchIndex}");
+            _logger.LogInformation($"leaderid: {CurrentState.Id}id: {p.Peer.Id}, newNextIndex: {newNextIndex}");
+
             p.UpdateMatchIndex(newMatchIndex);
             p.UpdateNextIndex(newNextIndex);
         }
@@ -127,64 +150,76 @@ namespace Rafty.Concensus
         private void UpdatePeerIndexes(PeerState p)
         {
             var nextIndex = p.NextIndex.NextLogIndexToSendToPeer <= 1 ? 1 : p.NextIndex.NextLogIndexToSendToPeer - 1;
-                        p.UpdateNextIndex(nextIndex);
+            p.UpdateNextIndex(nextIndex);
         }
 
         private void UpdateIndexes(PeerState peer, List<(int index, LogEntry logEntry)> logsToSend, AppendEntriesResponse appendEntriesResponse)
         {
-            lock (_lock)
+            if (appendEntriesResponse.Success)
             {
-                if (appendEntriesResponse.Success)
+                if (logsToSend.Any())
                 {
-                    UpdatePeerIndexes(peer, logsToSend);
-                } 
-                else
-                {
-                    UpdatePeerIndexes(peer);
+                    _logger.LogInformation($"id: {CurrentState.Id} received append entries success from {peer.Peer.Id}");
                 }
+                UpdatePeerIndexes(peer, logsToSend);
+            } 
+            else
+            {
+                if (logsToSend.Any())
+                {
+                    _logger.LogInformation($"id: {CurrentState.Id} received append entries fail from {peer.Peer.Id}");
+                }
+
+                UpdatePeerIndexes(peer);
             }
         }
 
-        private void SendAppendEntries()
+        private async Task SendAppendEntries(int electionTimerId)
         {
-            if(_appendingEntries == true)
-            {
-                return;
-            }
-
-            _appendingEntries = true;
-
             var peers = _getPeers(CurrentState);
 
             if(No(peers))
             {
-                _appendingEntries = false;
                 return;
             }
 
             if(PeerStates.Count != peers.Count)
             {
                 var peersNotInPeerStates = peers.Where(p => !PeerStates.Select(x => x.Peer.Id).Contains(p.Id)).ToList();
-                
-                peersNotInPeerStates.ForEach(p => {
+                    
+                peersNotInPeerStates.ForEach(async p => {
                     var matchIndex = new MatchIndex(p, 0);
-                    var nextIndex = new NextIndex(p, _log.LastLogIndex);
+                    var nextIndex = new NextIndex(p, await _log.LastLogIndex());
                     PeerStates.Add(new PeerState(p, matchIndex, nextIndex));
                 });
             }
 
             var appendEntriesResponses = SetUpAppendingEntries();
 
-            Parallel.ForEach(PeerStates, peer =>
+            async Task Do(PeerState peer)
             {
-                var logsToSend = GetLogsForPeer(peer.NextIndex);
-              
-                var appendEntriesResponse = GetAppendEntriesResponse(peer, logsToSend);
+                var logsToSend = await GetLogsForPeer(peer.NextIndex);
+
+                if(logsToSend.Any())
+                {
+                    _logger.LogInformation($"leaderid: {CurrentState.Id}, electionTimerId: {electionTimerId}, sending some logs {logsToSend.Count} to {peer.Peer.Id}, this should only happen once?");
+                }
+
+                var appendEntriesResponse = await GetAppendEntriesResponse(peer, logsToSend);
 
                 appendEntriesResponses.Add(appendEntriesResponse);
-                
+
                 UpdateIndexes(peer, logsToSend, appendEntriesResponse);
-            });
+            }
+
+            var tasks = new Task[PeerStates.Count];
+            for (int i = 0; i < tasks.Length; i++)
+            {
+                var peerState = PeerStates[i];
+                tasks[i] = Do(peerState);
+            }
+
+            await Task.WhenAll(tasks);
 
             var response = DoesResponseContainsGreaterTerm(appendEntriesResponses);
 
@@ -193,12 +228,10 @@ namespace Rafty.Concensus
                 CurrentState = new CurrentState(CurrentState.Id, response.newTerm, 
                         CurrentState.VotedFor, CurrentState.CommitIndex, CurrentState.LastApplied, CurrentState.LeaderId);
                 _node.BecomeFollower(CurrentState);
-                _appendingEntries = false;
                 return;
             }
 
-            UpdateCommitIndex();
-            _appendingEntries = false;
+            await UpdateCommitIndex();
         }
 
         private (bool conainsGreaterTerm, long newTerm) DoesResponseContainsGreaterTerm(ConcurrentBag<AppendEntriesResponse> appendEntriesResponses)
@@ -214,7 +247,7 @@ namespace Rafty.Concensus
             return (false, 0);
         }
 
-        private void UpdateCommitIndex()
+        private async Task UpdateCommitIndex()
         {
             var nextCommitIndex = CurrentState.CommitIndex + 1;
             var statesIndexOfHighestKnownReplicatedLogs = PeerStates.Select(x => x.MatchIndex.IndexOfHighestKnownReplicatedLog).ToList();
@@ -222,7 +255,7 @@ namespace Rafty.Concensus
             var lessThanN = statesIndexOfHighestKnownReplicatedLogs.Where(x => x < nextCommitIndex).ToList();
             if (greaterOrEqualToN.Count > lessThanN.Count)
             {
-                if (_log.GetTermAtIndex(nextCommitIndex) == CurrentState.CurrentTerm)
+                if (await _log.GetTermAtIndex(nextCommitIndex) == CurrentState.CurrentTerm)
                 {
                     CurrentState = new CurrentState(CurrentState.Id, CurrentState.CurrentTerm, 
                         CurrentState.VotedFor,  nextCommitIndex, CurrentState.LastApplied, CurrentState.LeaderId);
@@ -230,12 +263,27 @@ namespace Rafty.Concensus
             }
         }
 
+        private int _electionTimerId;
+
         private void ResetElectionTimer()
         {
             _electionTimer?.Dispose();
-            _electionTimer = new Timer(x =>
+            _electionTimer = new Timer(async x =>
             {
-                SendAppendEntries();
+                _electionTimerId++;
+                _logger.LogInformation($"id: {CurrentState.Id}, _electionTimerId:{_electionTimerId}, _appendingEntries was {_appendingEntries}");
+
+                if (_appendingEntries)
+                {
+                    return;
+                }
+
+                _appendingEntries = true;
+                _logger.LogInformation($"id: {CurrentState.Id}, _electionTimerId:{_electionTimerId}, sending append entries should be at most every 500ms");
+                await SendAppendEntries(_electionTimerId);
+                _logger.LogInformation($"id: {CurrentState.Id}, _electionTimerId:{_electionTimerId}, finished sending append entries");
+                
+                _appendingEntries = false;
 
             }, null, 0, Convert.ToInt32(_settings.HeartbeatTimeout));
         }
@@ -244,17 +292,19 @@ namespace Rafty.Concensus
         {
             PeerStates = new List<PeerState>();
             var peers = _getPeers(CurrentState);
-            peers.ForEach(p => {
+            peers.ForEach(async p => {
                 var matchIndex = new MatchIndex(p, 0);
-                var nextIndex = new NextIndex(p, _log.LastLogIndex);
+                var nextIndex = new NextIndex(p, await _log.LastLogIndex());
                 PeerStates.Add(new PeerState(p, matchIndex, nextIndex));
             });
         }
 
-        private int AddCommandToLog<T>(T command) where T : ICommand
+        private async Task<int> AddCommandToLog<T>(T command) where T : ICommand
         {
             var log = new LogEntry(command, command.GetType(), CurrentState.CurrentTerm);
-            var index = _log.Apply(log);
+            _logger.LogInformation($"{CurrentState.Id} leader logging command");
+            var index = await _log.Apply(log);
+            _logger.LogInformation($"{CurrentState.Id} leader logging command index: {index}");
             return index;
         }
 
@@ -277,10 +327,17 @@ namespace Rafty.Concensus
 
         private bool Replicated(PeerState peer, int index)
         {
-            return peer.MatchIndex.IndexOfHighestKnownReplicatedLog == index;
+            var replicated =  peer.MatchIndex.IndexOfHighestKnownReplicatedLog == index;
+            if (!replicated)
+            {
+                _logger.LogInformation(
+                    $"id: {CurrentState.Id} has not replicated to peerId: {peer.Peer.Id}, index: {index} and IndexOfHighestKnownReplicatedLog: {peer.MatchIndex.IndexOfHighestKnownReplicatedLog}");
+            }
+
+            return replicated;
         }
 
-        private void FinishWaitingForCommandToReplicate()
+        private void StopWaitingForCommandToReplicate()
         {
             _handled = true;
             _stopWatch.Stop();
@@ -291,13 +348,21 @@ namespace Rafty.Concensus
             Thread.Sleep(_settings.HeartbeatTimeout);
         }
 
-        private List<(int index ,LogEntry logEntry)> GetLogsForPeer(NextIndex nextIndex)
+        private async Task<List<(int index ,LogEntry logEntry)>> GetLogsForPeer(NextIndex nextIndex)
         {
-            if (_log.Count > 0)
+            if (await _log.Count() > 0)
             {
-                if (_log.LastLogIndex >= nextIndex.NextLogIndexToSendToPeer)
+                var lastLogIndex = await _log.LastLogIndex();
+
+                _logger.LogInformation($"lastLogIndex: {lastLogIndex}");
+                _logger.LogInformation($"nextIndex.NextLogIndexToSendToPeer: {nextIndex.NextLogIndexToSendToPeer}");
+
+                if (lastLogIndex >= nextIndex.NextLogIndexToSendToPeer)
                 {
-                    var logs = _log.GetFrom(nextIndex.NextLogIndexToSendToPeer);
+                    var logs = await _log.GetFrom(nextIndex.NextLogIndexToSendToPeer);
+                    
+                    _logger.LogInformation($"using {nextIndex.NextLogIndexToSendToPeer} leader got logs.Count: {logs.Count}");
+
                     return logs;
                 }
             }
@@ -318,13 +383,13 @@ namespace Rafty.Concensus
             return (null, false);
         }
 
-        private void ApplyToStateMachine(AppendEntries appendEntries, int commitIndex, int lastApplied)
+        private async Task ApplyToStateMachine(AppendEntries appendEntries, int commitIndex, int lastApplied)
         {
             while (commitIndex > lastApplied)
             {
                 lastApplied++;
-                var log = _log.Get(lastApplied);
-                _fsm.Handle(log);
+                var log = await _log.Get(lastApplied);
+                await _fsm.Handle(log);
             }
 
             CurrentState = new CurrentState(CurrentState.Id, appendEntries.Term,
@@ -346,27 +411,28 @@ namespace Rafty.Concensus
             return false;
         }
 
-        private void ApplyToStateMachineAndUpdateCommitIndex(LogEntry log)
+        private async Task ApplyToStateMachineAndUpdateCommitIndex(LogEntry log)
         {
             var nextCommitIndex = CurrentState.CommitIndex + 1;
-            if (_log.GetTermAtIndex(nextCommitIndex) == CurrentState.CurrentTerm)
+            if (await _log.GetTermAtIndex(nextCommitIndex) == CurrentState.CurrentTerm)
             {
                 CurrentState = new CurrentState(CurrentState.Id, CurrentState.CurrentTerm, 
                     CurrentState.VotedFor,  nextCommitIndex, CurrentState.LastApplied, CurrentState.LeaderId);
             }
 
-            _fsm.Handle(log);
+            await _fsm.Handle(log);
         }
 
         private OkResponse<T> Ok<T>(T command)
         {
+            _logger.LogInformation($"id: {CurrentState.Id} returned OK from replicating command");
             return new OkResponse<T>(command);
         }
 
-        private ErrorResponse<T> UnableDueToTimeout<T>(T command, int indexOfCommand)
+        private async Task<ErrorResponse<T>> UnableDueToTimeout<T>(T command, int indexOfCommand)
         {
             DecrementIndexesOfAnyPeersCommandReplicatedTo(indexOfCommand);
-            _log.Remove(indexOfCommand);
+            await _log.Remove(indexOfCommand);
             _appendingEntries = false;
             return new ErrorResponse<T>("Unable to replicate command to peers due to timeout.", command);
         }
@@ -382,7 +448,7 @@ namespace Rafty.Concensus
             });
         }
 
-        private Response<T> Replicate<T>(T command, int indexOfCommand)
+        private async Task<Response<T>> Replicate<T>(T command, int indexOfCommand)
         {
             SetUpReplication();
             
@@ -390,7 +456,8 @@ namespace Rafty.Concensus
             {
                 if(ReplicationTimeout())
                 {
-                    return UnableDueToTimeout(command, indexOfCommand);
+                    _logger.LogInformation($"id: {CurrentState.Id} Replication timed out..");
+                    return await UnableDueToTimeout(command, indexOfCommand);
                 }
 
                 var replicated = 0;
@@ -404,9 +471,9 @@ namespace Rafty.Concensus
 
                     if (ReplicatedToMajority(replicated))
                     {
-                        var log = _log.Get(indexOfCommand);
-                        _fsm.Handle(log);
-                        FinishWaitingForCommandToReplicate();
+                        var log = await _log.Get(indexOfCommand);
+                        await _fsm.Handle(log);
+                        StopWaitingForCommandToReplicate();
                         break;
                     }
                 }
